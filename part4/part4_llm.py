@@ -2,7 +2,8 @@
 =====================================================================
  PART 4 — LLM-Powered Feature
  TRACK CHOSEN: (C) Model Prediction Explanation Pipeline
- Input : best_model.pkl (produced by Part 3's part3_ensembles.py)
+ Input : best_model.pkl              (Part 3's part3_ensembles.py)
+         expected_power_model.pkl    (Part 2's part2_models.py)
 =====================================================================
 Run with:  python3 part4_llm_explain.py
 
@@ -236,16 +237,27 @@ guardrail_table.to_csv(f"{RESULTS_DIR}/pii_guardrail_test.csv", index=False)
 print(f"Saved: {RESULTS_DIR}/pii_guardrail_test.csv")
 
 # =====================================================================
-# STEP 2 — LOAD BEST MODEL FROM PART 3
+# STEP 2 — LOAD BEST CLASSIFIER (Part 3) AND EXPECTED-POWER MODEL (Part 2)
 # =====================================================================
 print("\n" + "=" * 70)
-print("STEP 2: LOAD best_model.pkl")
+print("STEP 2: LOAD best_model.pkl AND expected_power_model.pkl")
 print("=" * 70)
 
 model_path = find_file("best_model.pkl")
 print(f"Loading: {model_path}")
 best_model = joblib.load(model_path)
-print(f"Loaded model type: {type(best_model)}")
+print(f"Loaded classifier type: {type(best_model)}")
+
+# expected_power_model.pkl is the Ridge regression pipeline saved at the end
+# of Part 2 (part2_models.py, Task 4c). It was fit on the SAME leak-free
+# feature set as the classifier (weather + time + inverter identity, no
+# AC_POWER lag/rolling features), so it can be used to estimate what AC
+# power a reading "should" produce given its conditions -- the "Expected
+# Power" half of the Performance Ratio used in the LLM explanation below.
+power_model_path = find_file("expected_power_model.pkl")
+print(f"Loading: {power_model_path}")
+expected_power_model = joblib.load(power_model_path)
+print(f"Loaded regression model type: {type(expected_power_model)}")
 
 # The exact column order the pipeline was fit on (Part 3: SimpleImputer ->
 # StandardScaler -> RandomForestClassifier, fit on un-scaled X_train which
@@ -263,7 +275,10 @@ KNOWN_INVERTERS = ["1BY6WEcLGh8j5v7"] + [c.replace("SOURCE_KEY_GEN_", "") for c 
 def encode_record(features: dict) -> pd.DataFrame:
     """
     Preprocess a raw feature dict into the single-row DataFrame the
-    pipeline expects, with columns in FEATURE_ORDER.
+    pipeline expects, with columns in FEATURE_ORDER. This same encoded
+    row is used for BOTH the classifier (best_model) and the regression
+    model (expected_power_model), since they share the identical feature
+    set and encoding.
 
     Expected keys in `features`:
         AMBIENT_TEMPERATURE (float)
@@ -296,49 +311,81 @@ def encode_record(features: dict) -> pd.DataFrame:
 # STEP 3 — THREE HAND-CRAFTED FEATURE-VECTOR INPUTS
 # =====================================================================
 print("\n" + "=" * 70)
-print("STEP 3: HAND-CRAFTED FEATURE-VECTOR INPUTS -> PREDICT / PREDICT_PROBA")
+print("STEP 3: HAND-CRAFTED FEATURE-VECTOR INPUTS -> PREDICT / PREDICT_PROBA / EXPECTED POWER")
 print("=" * 70)
 
+# Each input now also carries a hand-crafted ACTUAL_AC_POWER value (kW) --
+# a plausible measured reading paired with that synthetic scenario. This
+# lets the pipeline compute Expected Power (from expected_power_model),
+# Actual Power (hand-crafted), and Performance Ratio = Actual / Expected,
+# which are the quantities a plant operator actually cares about, rather
+# than only the raw weather/time conditions.
 hand_crafted_inputs = [
-    {  # Clear daytime, high irradiation, healthy-looking reading
+    {  # Clear daytime, high irradiation, healthy-looking reading -- actual
+       # power close to what conditions would predict (ratio near 1.0)
         "AMBIENT_TEMPERATURE": 32.0,
         "MODULE_TEMPERATURE": 48.5,
         "IRRADIATION": 0.85,
         "HOUR": 12,
         "DAY_PERIOD": "Afternoon",
         "SOURCE_KEY_GEN": "1IF53ai7Xc0U56Y",
+        "ACTUAL_AC_POWER": 940.0,
     },
-    {  # Low irradiation, early morning -- plausible underperformance candidate
+    {  # Low irradiation, early morning -- low actual power that is
+       # expected given the conditions (ratio should still be near 1.0,
+       # illustrating "low output, but not a fault")
         "AMBIENT_TEMPERATURE": 24.0,
         "MODULE_TEMPERATURE": 25.0,
         "IRRADIATION": 0.05,
         "HOUR": 7,
         "DAY_PERIOD": "Morning",
         "SOURCE_KEY_GEN": "adLQvlD726eNBSB",
+        "ACTUAL_AC_POWER": 42.0,
     },
-    {  # Moderate irradiation, evening, mid-range conditions
+    {  # Moderate irradiation, evening -- actual power deliberately well
+       # below what the conditions would predict (ratio well under 1.0,
+       # illustrating a genuine underperformance case for the LLM to flag)
         "AMBIENT_TEMPERATURE": 28.0,
         "MODULE_TEMPERATURE": 33.0,
         "IRRADIATION": 0.35,
         "HOUR": 17,
         "DAY_PERIOD": "Evening",
         "SOURCE_KEY_GEN": "z9Y9gH1T5YWrNuG",
+        "ACTUAL_AC_POWER": 210.0,
     },
 ]
 
 encoded_rows = []
 predictions = []
 probabilities = []
+expected_powers = []
+performance_ratios = []
 for i, feats in enumerate(hand_crafted_inputs, start=1):
     encoded = encode_record(feats)
     pred = best_model.predict(encoded)[0]
     proba = best_model.predict_proba(encoded)[0, 1]
+
+    expected_power = float(expected_power_model.predict(encoded)[0])
+    expected_power = max(expected_power, 0.0)  # power can't be negative; clip a small-magnitude regression undershoot
+    actual_power = feats["ACTUAL_AC_POWER"]
+    # Guard against division by (near) zero at full-night / zero-irradiation
+    # edge cases; a near-zero expected power with non-trivial actual power
+    # is itself notable and reported as such rather than raising an error.
+    performance_ratio = actual_power / expected_power if expected_power > 1.0 else None
+
     encoded_rows.append(encoded)
     predictions.append(int(pred))
     probabilities.append(float(proba))
+    expected_powers.append(expected_power)
+    performance_ratios.append(performance_ratio)
+
     print(f"\nInput {i}: {feats}")
     print(f"  Predicted class (1=underperforming): {pred}")
     print(f"  Predicted probability of underperformance: {proba:.4f}")
+    print(f"  Expected AC Power (regression model): {expected_power:.1f} kW")
+    print(f"  Actual AC Power (hand-crafted): {actual_power:.1f} kW")
+    ratio_str = f"{performance_ratio:.3f}" if performance_ratio is not None else "N/A (expected power ~0)"
+    print(f"  Performance Ratio (actual / expected): {ratio_str}")
 
 # =====================================================================
 # STEP 4 — SCHEMA + PROMPT DESIGN FOR EXPLANATIONS
@@ -368,16 +415,24 @@ EXPLANATION_SCHEMA = {
 SYSTEM_PROMPT = (
     "You are a solar-plant monitoring assistant. You are given the feature "
     "values used by a machine-learning classifier, the classifier's predicted "
-    "class, and its predicted probability for a single inverter reading. The "
-    "model flags a reading as class 1 ('underperforming') when AC power output "
-    "falls in the bottom 20% of all genuine daytime readings (IRRADIATION > 0). "
-    "Explain the prediction in plain language for a plant operator. "
-    "If the primary driver of a low-output prediction is naturally low "
-    "irradiation (e.g. very early morning, late evening, or overcast "
-    "conditions), say the low output may be expected given current conditions, "
-    "and recommend inspecting the panels/inverter only if similarly low output "
-    "continues once irradiation rises -- do not jump straight to recommending a "
-    "physical inspection when the conditions themselves plausibly explain it. "
+    "class, its predicted probability for a single inverter reading, and three "
+    "measured/estimated power quantities: Expected AC Power (what a separate "
+    "regression model, trained only on weather/time/inverter-identity features, "
+    "predicts this reading 'should' produce), Actual AC Power (what was really "
+    "measured), and Performance Ratio (Actual / Expected). The classifier flags "
+    "a reading as class 1 ('underperforming') when AC power output falls in the "
+    "bottom 20% of all genuine daytime readings (IRRADIATION > 0). "
+    "Explain the prediction in plain language for a plant operator, and ground "
+    "your explanation in the Performance Ratio rather than only the raw "
+    "environmental conditions: a Performance Ratio near 1.0 means the reading is "
+    "close to what conditions predict, even if absolute output is low (e.g. early "
+    "morning or overcast) -- in that case say the low output is expected given "
+    "current conditions and do not recommend inspection. A Performance Ratio "
+    "meaningfully below 1.0 (roughly under 0.85) means the inverter produced "
+    "notably less than conditions predict, which is a genuine deviation worth "
+    "flagging -- in that case recommend inspecting the panels/inverter. If "
+    "Performance Ratio is not available (expected power is near zero, e.g. deep "
+    "night), rely on the raw conditions instead and say so. "
     "Respond ONLY in English. Do not use words, phrases, or characters from any "
     "other language, anywhere in the response. "
     "Respond with ONLY a single valid JSON object -- no markdown code fences, "
@@ -397,7 +452,10 @@ USER_PROMPT_TEMPLATE = (
     "  Day period: {DAY_PERIOD}\n"
     "  Inverter ID: {SOURCE_KEY_GEN}\n"
     "Predicted class: {predicted_class} (1 = underperforming, 0 = normal)\n"
-    "Predicted probability of underperformance: {predicted_proba:.4f}\n\n"
+    "Predicted probability of underperformance: {predicted_proba:.4f}\n"
+    "Expected AC Power (kW, from regression model): {expected_power:.1f}\n"
+    "Actual AC Power (kW, measured): {actual_power:.1f}\n"
+    "Performance Ratio (Actual / Expected): {performance_ratio_str}\n\n"
     "Return the JSON explanation now."
 )
 
@@ -415,7 +473,8 @@ print(
 )
 
 
-def build_user_prompt(feats, pred, proba):
+def build_user_prompt(feats, pred, proba, expected_power, actual_power, performance_ratio):
+    ratio_str = f"{performance_ratio:.3f}" if performance_ratio is not None else "N/A (expected power near zero)"
     return USER_PROMPT_TEMPLATE.format(
         AMBIENT_TEMPERATURE=feats["AMBIENT_TEMPERATURE"],
         MODULE_TEMPERATURE=feats["MODULE_TEMPERATURE"],
@@ -425,6 +484,9 @@ def build_user_prompt(feats, pred, proba):
         SOURCE_KEY_GEN=feats["SOURCE_KEY_GEN"],
         predicted_class=pred,
         predicted_proba=proba,
+        expected_power=expected_power,
+        actual_power=actual_power,
+        performance_ratio_str=ratio_str,
     )
 
 
@@ -465,10 +527,16 @@ print("=" * 70)
 
 demo_rows = []
 for i, feats in enumerate(hand_crafted_inputs, start=1):
-    user_prompt = build_user_prompt(feats, predictions[i - 1], probabilities[i - 1])
+    user_prompt = build_user_prompt(
+        feats, predictions[i - 1], probabilities[i - 1],
+        expected_powers[i - 1], feats["ACTUAL_AC_POWER"], performance_ratios[i - 1],
+    )
     print(f"\n--- Input {i} ---")
     print(f"Feature input: {feats}")
     print(f"Predicted class: {predictions[i - 1]}   Probability: {probabilities[i - 1]:.4f}")
+    print(f"Expected power: {expected_powers[i - 1]:.1f} kW   "
+          f"Actual power: {feats['ACTUAL_AC_POWER']:.1f} kW   "
+          f"Performance ratio: {performance_ratios[i - 1]}")
 
     blocked = has_pii(user_prompt)
     if blocked:
@@ -489,6 +557,11 @@ for i, feats in enumerate(hand_crafted_inputs, start=1):
         "Feature Input": json.dumps(feats),
         "Predicted Class": predictions[i - 1],
         "Probability": round(probabilities[i - 1], 4),
+        "Expected Power (kW)": round(expected_powers[i - 1], 1),
+        "Actual Power (kW)": feats["ACTUAL_AC_POWER"],
+        "Performance Ratio": (
+            round(performance_ratios[i - 1], 3) if performance_ratios[i - 1] is not None else None
+        ),
         "Explanation JSON": json.dumps(parsed),
         "Validation Status": status,
         "Guardrail Result": pass_block,
@@ -509,7 +582,10 @@ print("=" * 70)
 
 temp_rows = []
 for i, feats in enumerate(hand_crafted_inputs, start=1):
-    user_prompt = build_user_prompt(feats, predictions[i - 1], probabilities[i - 1])
+    user_prompt = build_user_prompt(
+        feats, predictions[i - 1], probabilities[i - 1],
+        expected_powers[i - 1], feats["ACTUAL_AC_POWER"], performance_ratios[i - 1],
+    )
 
     if has_pii(user_prompt):
         out_t0, out_t7 = None, None
@@ -552,3 +628,927 @@ print(
 )
 
 print("\nDONE. All tables saved in ./results/.")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

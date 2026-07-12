@@ -97,7 +97,7 @@ X = pd.get_dummies(X, columns=["SOURCE_KEY_GEN"], drop_first=True)
 X = X.astype(float)
 
 X_train, X_test, y_reg_train, y_reg_test, y_clf_train, y_clf_test = train_test_split(
-    X, y_reg, y_clf, test_size=0.2, random_state=42, stratify=y_clf
+    X, y_reg, y_clf, test_size=0.2, random_state=42
 )
 
 scaler = StandardScaler()
@@ -108,6 +108,27 @@ X_test_scaled = scaler.transform(X_test)
 feature_names = X.columns.tolist()
 print(f"Train shape: {X_train.shape}   Test shape: {X_test.shape}")
 print(f"Feature count: {len(feature_names)}")
+print(
+    "NOTE (for README): train_test_split(X, y, test_size=0.2, random_state=42) "
+    "with no stratify argument, matching Part 2's split exactly (Part 3 re-derives "
+    "the identical split rather than re-using in-memory objects, so this script "
+    "can run standalone)."
+)
+
+# ---------------------------------------------------------------------
+# CROSS-VALIDATION STRATEGY
+# ---------------------------------------------------------------------
+# Using StratifiedKFold(n_splits=5, shuffle=True, random_state=42), as
+# specified in the assignment instructions for Task 5 and Task 6.
+# (Note for README: since this is time-ordered solar-plant data, a
+# TimeSeriesSplit-based CV -- training only on the past and validating only
+# on strictly later readings -- is arguably a more realistic estimate of
+# deployed performance than shuffled folds, which can validate a model on
+# data that is chronologically earlier than some of its training rows.
+# StratifiedKFold is used here to match the assignment's specified method
+# and keep the underperformance class ratio consistent across folds.)
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+print("StratifiedKFold(n_splits=5, shuffle=True, random_state=42) configured for Tasks 5 and 6.")
 
 # =====================================================================
 # TASK 1 — DECISION TREE BASELINE (UNCONSTRAINED)
@@ -317,13 +338,11 @@ print(
 )
 
 # =====================================================================
-# TASK 5 — CROSS-VALIDATED COMPARISON
+# TASK 5 — CROSS-VALIDATED COMPARISON (StratifiedKFold, 5-fold, ROC-AUC)
 # =====================================================================
 print("\n" + "=" * 70)
-print("TASK 5: CROSS-VALIDATED COMPARISON (5-fold, ROC-AUC)")
+print("TASK 5: CROSS-VALIDATED COMPARISON (StratifiedKFold, 5-fold, ROC-AUC)")
 print("=" * 70)
-
-skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
 cv_models = {
     "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
@@ -347,14 +366,15 @@ print(
     "in the test set. 5-fold cross-validation instead trains and evaluates the model 5 times "
     "on 5 different train/validation partitions and averages the results, giving both a more "
     "stable mean-performance estimate and a standard deviation that quantifies how sensitive "
-    "the model is to which rows it is trained/evaluated on."
+    "the model is to which rows it is trained/evaluated on. StratifiedKFold specifically keeps "
+    "the underperformance class ratio consistent across every fold."
 )
 
 # =====================================================================
-# TASK 6 — HYPERPARAMETER TUNING WITH GRIDSEARCHCV
+# TASK 6 — HYPERPARAMETER TUNING WITH GRIDSEARCHCV (StratifiedKFold)
 # =====================================================================
 print("\n" + "=" * 70)
-print("TASK 6: GRIDSEARCHCV — RANDOM FOREST PIPELINE")
+print("TASK 6: GRIDSEARCHCV — RANDOM FOREST PIPELINE (StratifiedKFold)")
 print("=" * 70)
 
 param_grid = {
@@ -400,6 +420,7 @@ gridsearch_results = pd.DataFrame([{
     "best_cv_auc": grid_search.best_score_,
     "n_configurations": n_configs,
     "n_total_fits": n_fits,
+    "cv_strategy": "StratifiedKFold(n_splits=5, shuffle=True, random_state=42)",
 }])
 gridsearch_results.to_csv(f"{RESULTS_DIR}/gridsearch_results.csv", index=False)
 print(f"Saved: {RESULTS_DIR}/gridsearch_results.csv")
@@ -520,7 +541,8 @@ print(
     "selected using cross-validated AUC rather than a single train/test split, reducing the "
     "risk that the reported performance is an artifact of one particular data split. It is also "
     "packaged end-to-end (imputation + scaling + model) as a single serialized pipeline, making "
-    "it straightforward to reload and serve in production without re-implementing preprocessing."
+    "it straightforward "
+    "to reload and serve in production without re-implementing preprocessing."
 )
 
 print("\nDONE. All figures in ./figures/, all tables in ./results/, model in ./best_model.pkl")

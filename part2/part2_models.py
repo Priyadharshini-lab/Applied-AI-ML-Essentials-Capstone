@@ -17,6 +17,9 @@ Produces:
   - results/classification_report.csv
   - results/confusion_matrix.csv
   - results/model_summary.csv
+  - expected_power_model.pkl   (Ridge regression pipeline, reused by Part 4
+                                 to estimate "expected AC power" for the LLM
+                                 explanation feature)
 """
 
 import os
@@ -26,10 +29,12 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import joblib
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression, Ridge, LogisticRegression
+from sklearn.pipeline import make_pipeline
 from sklearn.metrics import (
     mean_squared_error, r2_score,
     confusion_matrix, classification_report, ConfusionMatrixDisplay,
@@ -113,6 +118,13 @@ print(f"Positive (underperforming) class share: {y_clf.mean()*100:.1f}%")
 # history -> leakage), DATE_TIME (raw timestamp, not usable directly),
 # PLANT_ID (single constant value in this file -> zero variance),
 # SOURCE_KEY_WX (one constant weather-station id -> zero variance).
+#
+# NOTE: this feature set deliberately contains NO lagged or rolling
+# AC_POWER / DC_POWER features (e.g. AC_POWER_LAG_1, AC_POWER_ROLL_MEAN_3).
+# Such features are derived from the regression target itself and would
+# make the "expected power" model trivially easy (and would leak the
+# classification label too, since y_clf is derived from AC_POWER).
+# Only weather, time, and inverter-identity features are used.
 drop_cols = ["AC_POWER", "DC_POWER", "DAILY_YIELD", "TOTAL_YIELD",
              "DATE_TIME", "PLANT_ID", "SOURCE_KEY_WX"]
 X = day.drop(columns=drop_cols)
@@ -159,11 +171,18 @@ print("TASK 3: TRAIN/TEST SPLIT AND SCALING")
 print("=" * 70)
 
 X_train, X_test, y_reg_train, y_reg_test, y_clf_train, y_clf_test = train_test_split(
-    X, y_reg, y_clf, test_size=0.2, random_state=42, stratify=y_clf
+    X, y_reg, y_clf, test_size=0.2, random_state=42
 )
 print(f"Train shape: {X_train.shape}   Test shape: {X_test.shape}")
-print("stratify=y_clf used so the underperformance class ratio is preserved "
-      "identically in both the train and test splits.")
+print(
+    "NOTE (for README): matches the assignment's split call exactly -- "
+    "train_test_split(X, y, test_size=0.2, random_state=42), no stratify "
+    "argument. (stratify=y_clf is also defensible practice here, since it "
+    "would force the ~20% underperformance ratio to match in both splits, "
+    "but it isn't part of the literal instructions, so it's left out to "
+    "match them precisely. With random_state=42 fixed, the resulting split "
+    "is still fully reproducible.)"
+)
 
 scaler = StandardScaler()
 scaler.fit(X_train)                       # fit ONLY on training data
@@ -237,6 +256,32 @@ print(reg_comparison.to_string(index=False))
 # --- SAVE: OLS vs Ridge comparison ---
 reg_comparison.to_csv(f"{RESULTS_DIR}/ridge_vs_linear.csv", index=False)
 print(f"Saved: {RESULTS_DIR}/ridge_vs_linear.csv")
+
+# =====================================================================
+# TASK 4c — SAVE A REGRESSION PIPELINE FOR "EXPECTED POWER" ESTIMATION
+# =====================================================================
+print("\n" + "=" * 70)
+print("TASK 4c: SAVE EXPECTED-POWER REGRESSION PIPELINE")
+print("=" * 70)
+
+# Bundled as (scaler + Ridge) pipeline fit on the UNSCALED X_train, so it
+# can be called downstream (Part 4) on raw feature dicts without having to
+# re-fit or re-export the StandardScaler separately. This is the same
+# feature set and same leak-free split used above -- no AC_POWER lag /
+# rolling features, so this is a genuine "expected power given weather +
+# time + inverter identity" model, not a model that has seen the target.
+expected_power_pipeline = make_pipeline(StandardScaler(), Ridge(alpha=1.0))
+expected_power_pipeline.fit(X_train, y_reg_train)
+
+sanity_pred = expected_power_pipeline.predict(X_test.iloc[:3])
+print(f"Sanity check -- expected-power predictions on 3 test rows: {sanity_pred}")
+
+joblib.dump(expected_power_pipeline, "expected_power_model.pkl")
+print(
+    "Saved: expected_power_model.pkl "
+    "(Ridge regression pipeline; used by Part 4 to compute 'Expected AC Power' "
+    "and, together with actual power, a Performance Ratio for the LLM explanation prompt)"
+)
 
 # =====================================================================
 # TASK 5 — LOGISTIC REGRESSION (with class-imbalance handling)
@@ -402,13 +447,8 @@ y_clf_test_arr = np.asarray(y_clf_test)
 n = len(y_clf_test_arr)
 n_boot = 500
 
-# FIX: use a list and only append valid draws, instead of pre-allocating
-# a fixed-size array and leaving some slots uninitialized whenever a
-# bootstrap sample happens to contain only one class (AUC is undefined
-# in that case). Appending guarantees every entry in `diffs` corresponds
-# to an actual computed value.
-# FIX: use a list and only append valid draws, instead of pre-allocating
-# a fixed-size array and leaving some slots uninitialized whenever a
+# Use a list and only append valid draws, instead of pre-allocating a
+# fixed-size array and leaving some slots uninitialized whenever a
 # bootstrap sample happens to contain only one class (AUC is undefined
 # in that case). Appending guarantees every entry in `diffs` corresponds
 # to an actual computed value.
@@ -468,4 +508,438 @@ print(summary.to_string(index=False))
 summary.to_csv(f"{RESULTS_DIR}/model_summary.csv", index=False)
 print(f"\nSaved: {RESULTS_DIR}/model_summary.csv")
 
-print("\nDONE. All figures in ./figures/, all tables in ./results/.")
+print("\nDONE. All figures in ./figures/, all tables in ./results/, "
+      "expected_power_model.pkl saved for Part 4.")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
