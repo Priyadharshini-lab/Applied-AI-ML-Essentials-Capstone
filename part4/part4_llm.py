@@ -7,11 +7,30 @@
 =====================================================================
 Run with:  python3 part4_llm_explain.py
 
-Requires an environment variable holding your LLM API key, e.g.:
-    export LLM_API_KEY="sk-or-..."
-Optionally override the endpoint / model:
-    export LLM_API_URL="https://openrouter.ai/api/v1/chat/completions"
-    export LLM_MODEL="openai/gpt-oss-20b:free"
+Requires an environment variable holding your LLM API key. Two ways to
+provide it:
+
+  (a) A .env file in the same folder as this script, containing:
+          LLM_API_KEY=sk-or-...
+      (requires `pip install python-dotenv`; this script loads it
+      automatically via load_dotenv() below -- just creating the .env
+      file is NOT enough on its own, it has to actually be loaded into
+      the process environment, which is what load_dotenv() does)
+
+  (b) Setting the environment variable directly in your shell, e.g.:
+          export LLM_API_KEY="sk-or-..."       (macOS/Linux)
+          set LLM_API_KEY=sk-or-...            (Windows cmd)
+          $env:LLM_API_KEY="sk-or-..."         (Windows PowerShell)
+
+Optionally override the endpoint / model (same .env or shell mechanism):
+    LLM_API_URL=https://openrouter.ai/api/v1/chat/completions
+    LLM_MODEL=openai/gpt-oss-20b:free
+
+SECURITY: never commit a real .env file or a real API key to git. Add
+`.env` to .gitignore and commit only a `.env.example` with a placeholder
+value (e.g. LLM_API_KEY=your-key-here). If a real key was ever exposed
+(committed, screenshotted, pasted in chat, etc.), treat it as compromised:
+revoke/delete it in your provider's dashboard and generate a new one.
 
 Produces:
   - console output for every task
@@ -29,6 +48,20 @@ import joblib
 import requests
 import pandas as pd
 from jsonschema import validate, ValidationError
+
+try:
+    from dotenv import load_dotenv
+    # Reads a .env file (if present) in the current working directory and
+    # injects its KEY=VALUE lines into os.environ, so os.environ.get(...)
+    # below can actually see them. Without this call, a .env file sitting
+    # on disk has no effect -- Python never reads it automatically.
+    load_dotenv()
+except ImportError:
+    print(
+        "NOTE: python-dotenv is not installed, so a .env file (if you have one) "
+        "will NOT be loaded automatically. Run: pip install python-dotenv "
+        "-- or export LLM_API_KEY directly in your shell instead."
+    )
 
 pd.set_option("display.width", 120)
 pd.set_option("display.max_columns", 20)
@@ -62,12 +95,30 @@ API_KEY = os.environ.get("LLM_API_KEY")
 API_URL = os.environ.get("LLM_API_URL", "https://openrouter.ai/api/v1/chat/completions")
 MODEL_NAME = os.environ.get("LLM_MODEL", "openai/gpt-oss-20b:free")
 
+# API key is NEVER hardcoded -- it is read from the environment (populated
+# either by a real shell `export`/`set`, or by load_dotenv() above reading
+# a local .env file).
+API_KEY = os.environ.get("LLM_API_KEY")
+API_URL = os.environ.get("LLM_API_URL", "https://openrouter.ai/api/v1/chat/completions")
+MODEL_NAME = os.environ.get("LLM_MODEL", "openai/gpt-oss-20b:free")
+
 if not API_KEY:
-    print("WARNING: LLM_API_KEY environment variable is not set. "
-          "Set it before running this script, e.g.:\n"
-          "    export LLM_API_KEY='your-key-here'\n"
-          "The script will still run, but every call_llm() call will fail fast "
-          "and return None until a real key is provided.")
+    print(
+        "WARNING: LLM_API_KEY is not set in the environment. Checked both a "
+        "local .env file (via load_dotenv()) and the shell environment -- "
+        "neither has it. Set it one of these ways before running this script:\n"
+        "    (a) create a .env file next to this script containing:\n"
+        "            LLM_API_KEY=your-key-here\n"
+        "    (b) export LLM_API_KEY='your-key-here'   (shell)\n"
+        "The script will still run, but every call_llm() call will fail fast "
+        "and return None until a real key is provided."
+    )
+else:
+    # Masked confirmation only -- NEVER print the full key (to console,
+    # logs, screenshots, or committed files). This just confirms the key
+    # was actually loaded and roughly what it looks like.
+    masked = API_KEY[:8] + "..." + API_KEY[-4:] if len(API_KEY) > 12 else "***"
+    print(f"LLM_API_KEY loaded successfully (masked): {masked}")
 
 
 def call_llm(system_prompt, user_prompt, temperature=0.0, max_tokens=1200, max_retries=3):
@@ -628,6 +679,313 @@ print(
 )
 
 print("\nDONE. All tables saved in ./results/.")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
