@@ -36,8 +36,8 @@ print("TASK 1: LOAD & INSPECT")
 print("=" * 70)
 
 
-gen = pd.read_csv("Plant_1_Generation_Data.csv")
-wx  = pd.read_csv("Plant_1_Weather_Sensor_Data.csv")
+gen = pd.read_csv("../Plant_1_Generation_Data.csv")
+wx  = pd.read_csv("../Plant_1_Weather_Sensor_Data.csv")
 
 
 # Generation timestamps are DD-MM-YYYY, weather timestamps are YYYY-MM-DD -> parse each correctly
