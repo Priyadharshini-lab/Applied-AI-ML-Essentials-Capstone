@@ -1,0 +1,1 @@
+pip install pandas numpy matplotlib seaborn scikit-learn imbalanced-learn joblib requests jsonschema python-dotenv
