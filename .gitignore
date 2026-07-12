@@ -1,4 +1,14 @@
+# Environment variables
 .env
+
+# Python
 __pycache__/
 *.pyc
+
+# VS Code
 .vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+
