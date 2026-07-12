@@ -1,0 +1,3 @@
+Test,Input,PII Detected,Outcome
+Contains email,Please summarize this record for john.doe@example.com and flag any issues.,True,Blocked (PII detected)
+Clean input,Please summarize this record and flag any issues.,False,Passed to LLM (response: 'I’d be happy to help! Could you please provide the record you’d like summarized and reviewed for any issues?')

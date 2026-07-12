@@ -1,0 +1,15 @@
+Dataset Name:
+Solar Power Generation Data - Plant 1
+
+Source:
+https://www.kaggle.com/datasets/anikannal/solar-power-generation-data
+
+Files Used:
+- Plant_1_Generation_Data.csv
+- Plant_1_Weather_Sensor_Data.csv
+
+Downloaded:
+July 2026
+
+Description:
+This dataset contains solar plant generation data and weather sensor measurements used for data cleaning, exploratory data analysis, machine learning, and LLM-powered prediction explanation in this capstone project.
