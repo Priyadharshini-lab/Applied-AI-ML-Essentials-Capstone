@@ -1,3 +1,0 @@
-Model,Train Accuracy,Test Accuracy,Train-Test Gap
-Unconstrained Tree,1.0,0.9824127149557061,0.017587285044293854
-"Controlled Tree (depth=5, min_split=20)",0.9953100573215217,0.9941375716519021,0.001172485669619583

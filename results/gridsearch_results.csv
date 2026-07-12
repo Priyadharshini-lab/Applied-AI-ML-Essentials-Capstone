@@ -1,2 +1,0 @@
-best_params,best_cv_auc,n_configurations,n_total_fits,cv_strategy
-"{'randomforestclassifier__max_depth': None, 'randomforestclassifier__min_samples_leaf': 5, 'randomforestclassifier__n_estimators': 100}",0.9989408747201576,18,90,"StratifiedKFold(n_splits=5, shuffle=True, random_state=42)"
