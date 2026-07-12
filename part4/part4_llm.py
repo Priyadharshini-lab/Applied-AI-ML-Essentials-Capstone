@@ -37,6 +37,31 @@ Produces:
   - results/pii_guardrail_test.csv
   - results/temperature_comparison.csv
   - results/prediction_explanations.csv
+
+=====================================================================
+FIX APPLIED IN THIS VERSION (vs the previous run's log)
+---------------------------------------------------------------------
+Input 3 in the previous run showed the LLM returning
+    prediction_label = "normal"
+alongside reasoning text that described a clearly bad Performance Ratio
+(0.469) and recommended an inspection -- i.e. the LLM's own wording
+contradicted the label it put in the very same JSON object, and that
+label happened to disagree with the classifier's actual predicted class.
+
+The fix has two layers:
+  1. PROMPT FIX: SYSTEM_PROMPT now contains an explicit, unambiguous rule
+     that prediction_label MUST mirror the classifier's predicted class
+     (not the Performance Ratio, not the LLM's own judgment).
+  2. CODE FIX (the one that actually guarantees correctness):
+     parse_and_validate() now takes the classifier's `pred` and force-
+     overwrites `prediction_label` to match it after parsing, regardless
+     of what the LLM wrote. A prompt instruction is a request; the code
+     override is a guarantee. If the LLM disagreed, that disagreement is
+     logged and preserved in a new "needs_review" column instead of being
+     silently lost -- a case where the hard classifier decision and the
+     continuous Performance Ratio disagree (as in Input 3) is genuinely
+     useful information for an operator, so it's surfaced, not overridden
+     away or hidden.
 """
 
 import os
@@ -89,11 +114,6 @@ def find_file(filename):
 print("=" * 70)
 print("STEP 0: LLM API CONNECTION SETUP")
 print("=" * 70)
-
-# API key is NEVER hardcoded -- it is read from an environment variable.
-API_KEY = os.environ.get("LLM_API_KEY")
-API_URL = os.environ.get("LLM_API_URL", "https://openrouter.ai/api/v1/chat/completions")
-MODEL_NAME = os.environ.get("LLM_MODEL", "openai/gpt-oss-20b:free")
 
 # API key is NEVER hardcoded -- it is read from the environment (populated
 # either by a real shell `export`/`set`, or by load_dotenv() above reading
@@ -172,8 +192,6 @@ def call_llm(system_prompt, user_prompt, temperature=0.0, max_tokens=1200, max_r
 
             choices = body.get("choices")
             if not choices:
-                # Model returned 200 but no choices -- print the full body so the
-                # cause (content filter, empty generation, provider error passthrough) is visible.
                 print(f"call_llm() got HTTP 200 but no 'choices' in body: {body}")
                 return None
 
@@ -218,8 +236,6 @@ def call_llm_english(system_prompt, user_prompt, temperature=0.0, max_tokens=120
         )
         if retry_response is not None and retry_response.isascii():
             return retry_response
-        # Fall back to whichever response we have; caller/validator will flag it if
-        # it still isn't valid JSON, but we don't silently lose the original result.
         print("call_llm_english() retry still non-ASCII or failed -- returning best available response.")
         return retry_response if retry_response is not None else response
 
@@ -299,12 +315,12 @@ print(f"Loading: {model_path}")
 best_model = joblib.load(model_path)
 print(f"Loaded classifier type: {type(best_model)}")
 
-# expected_power_model.pkl is the Ridge regression pipeline saved at the end
-# of Part 2 (part2_models.py, Task 4c). It was fit on the SAME leak-free
-# feature set as the classifier (weather + time + inverter identity, no
-# AC_POWER lag/rolling features), so it can be used to estimate what AC
-# power a reading "should" produce given its conditions -- the "Expected
-# Power" half of the Performance Ratio used in the LLM explanation below.
+# expected_power_model.pkl is the regression pipeline saved at the end of
+# Part 2. It was fit on the SAME leak-free feature set as the classifier
+# (weather + time + inverter identity, no AC_POWER lag/rolling features),
+# so it can be used to estimate what AC power a reading "should" produce
+# given its conditions -- the "Expected Power" half of the Performance
+# Ratio used in the LLM explanation below.
 power_model_path = find_file("expected_power_model.pkl")
 print(f"Loading: {power_model_path}")
 expected_power_model = joblib.load(power_model_path)
@@ -365,12 +381,11 @@ print("\n" + "=" * 70)
 print("STEP 3: HAND-CRAFTED FEATURE-VECTOR INPUTS -> PREDICT / PREDICT_PROBA / EXPECTED POWER")
 print("=" * 70)
 
-# Each input now also carries a hand-crafted ACTUAL_AC_POWER value (kW) --
-# a plausible measured reading paired with that synthetic scenario. This
-# lets the pipeline compute Expected Power (from expected_power_model),
-# Actual Power (hand-crafted), and Performance Ratio = Actual / Expected,
-# which are the quantities a plant operator actually cares about, rather
-# than only the raw weather/time conditions.
+# Each input carries a hand-crafted ACTUAL_AC_POWER value (kW) -- a plausible
+# measured reading paired with that synthetic scenario. This lets the
+# pipeline compute Expected Power (from expected_power_model), Actual Power
+# (hand-crafted), and Performance Ratio = Actual / Expected, which are the
+# quantities a plant operator actually cares about.
 hand_crafted_inputs = [
     {  # Clear daytime, high irradiation, healthy-looking reading -- actual
        # power close to what conditions would predict (ratio near 1.0)
@@ -383,8 +398,7 @@ hand_crafted_inputs = [
         "ACTUAL_AC_POWER": 940.0,
     },
     {  # Low irradiation, early morning -- low actual power that is
-       # expected given the conditions (ratio should still be near 1.0,
-       # illustrating "low output, but not a fault")
+       # expected given the conditions
         "AMBIENT_TEMPERATURE": 24.0,
         "MODULE_TEMPERATURE": 25.0,
         "IRRADIATION": 0.05,
@@ -394,8 +408,10 @@ hand_crafted_inputs = [
         "ACTUAL_AC_POWER": 42.0,
     },
     {  # Moderate irradiation, evening -- actual power deliberately well
-       # below what the conditions would predict (ratio well under 1.0,
-       # illustrating a genuine underperformance case for the LLM to flag)
+       # below what conditions would predict; this is the borderline case
+       # (classifier said class 0 at proba 0.37, but Performance Ratio is
+       # a poor 0.469) that exposed the labeling bug -- kept in on purpose
+       # as a regression test for the fix below.
         "AMBIENT_TEMPERATURE": 28.0,
         "MODULE_TEMPERATURE": 33.0,
         "IRRADIATION": 0.35,
@@ -439,6 +455,20 @@ for i, feats in enumerate(hand_crafted_inputs, start=1):
     print(f"  Performance Ratio (actual / expected): {ratio_str}")
 
 # =====================================================================
+# TASK: DETERMINE "NEEDS_REVIEW" IN CODE (NOT BY THE LLM)
+# =====================================================================
+# A borderline/disagreement flag computed directly from the classifier and
+# the Performance Ratio, independent of anything the LLM says. This is what
+# actually explains cases like Input 3: predicted class 0 (not flagged) but
+# a Performance Ratio of 0.469 (clearly poor) -- worth a human's attention
+# even though the hard classifier decision didn't cross its threshold.
+NEEDS_REVIEW_RATIO_THRESHOLD = 0.75
+needs_review_flags = []
+for pred, ratio in zip(predictions, performance_ratios):
+    disagreement = (pred == 0) and (ratio is not None) and (ratio < NEEDS_REVIEW_RATIO_THRESHOLD)
+    needs_review_flags.append(bool(disagreement))
+
+# =====================================================================
 # STEP 4 — SCHEMA + PROMPT DESIGN FOR EXPLANATIONS
 # =====================================================================
 print("\n" + "=" * 70)
@@ -478,12 +508,25 @@ SYSTEM_PROMPT = (
     "environmental conditions: a Performance Ratio near 1.0 means the reading is "
     "close to what conditions predict, even if absolute output is low (e.g. early "
     "morning or overcast) -- in that case say the low output is expected given "
-    "current conditions and do not recommend inspection. A Performance Ratio "
-    "meaningfully below 1.0 (roughly under 0.85) means the inverter produced "
-    "notably less than conditions predict, which is a genuine deviation worth "
-    "flagging -- in that case recommend inspecting the panels/inverter. If "
-    "Performance Ratio is not available (expected power is near zero, e.g. deep "
-    "night), rely on the raw conditions instead and say so. "
+    "current conditions. A Performance Ratio meaningfully below 1.0 (roughly "
+    "under 0.85) means the inverter produced notably less than conditions "
+    "predict, which is a genuine deviation worth mentioning in your reasoning "
+    "even if it doesn't change the label below. If Performance Ratio is not "
+    "available (expected power is near zero, e.g. deep night), rely on the raw "
+    "conditions instead and say so. "
+    # --- Hard constraint added to fix the label/class contradiction bug ---
+    "The field prediction_label MUST always match the classifier's Predicted "
+    "class exactly and is NOT a judgment call for you to make: if Predicted "
+    "class = 1, prediction_label MUST be the literal string 'underperforming'; "
+    "if Predicted class = 0, prediction_label MUST be the literal string "
+    "'normal'. Never let the Performance Ratio, or your own reasoning, lead you "
+    "to write a different label than the classifier's Predicted class -- use "
+    "the Performance Ratio only to inform top_reason/second_reason/next_step, "
+    "never to override prediction_label. If the Performance Ratio and the "
+    "Predicted class seem to disagree (e.g. class is 'normal' but the ratio is "
+    "poor), keep prediction_label as the classifier's class, note the "
+    "discrepancy in top_reason or second_reason, and set next_step to "
+    "recommend a closer look even though the hard classification is 'normal'. "
     "Respond ONLY in English. Do not use words, phrases, or characters from any "
     "other language, anywhere in the response. "
     "Respond with ONLY a single valid JSON object -- no markdown code fences, "
@@ -507,6 +550,8 @@ USER_PROMPT_TEMPLATE = (
     "Expected AC Power (kW, from regression model): {expected_power:.1f}\n"
     "Actual AC Power (kW, measured): {actual_power:.1f}\n"
     "Performance Ratio (Actual / Expected): {performance_ratio_str}\n\n"
+    "Reminder: prediction_label MUST exactly match Predicted class above "
+    "('underperforming' if Predicted class is 1, otherwise 'normal').\n\n"
     "Return the JSON explanation now."
 )
 
@@ -526,68 +571,96 @@ print(
 
 def build_user_prompt(feats, pred, proba, expected_power, actual_power, performance_ratio):
     ratio_str = f"{performance_ratio:.3f}" if performance_ratio is not None else "N/A (expected power near zero)"
-    return USER_PROMPT_TEMPLATE.format(
-        AMBIENT_TEMPERATURE=feats["AMBIENT_TEMPERATURE"],
-        MODULE_TEMPERATURE=feats["MODULE_TEMPERATURE"],
-        IRRADIATION=feats["IRRADIATION"],
-        HOUR=feats["HOUR"],
-        DAY_PERIOD=feats["DAY_PERIOD"],
-        SOURCE_KEY_GEN=feats["SOURCE_KEY_GEN"],
-        predicted_class=pred,
-        predicted_proba=proba,
-        expected_power=expected_power,
-        actual_power=actual_power,
-        performance_ratio_str=ratio_str,
+    required_label = "underperforming" if pred == 1 else "normal"
+    return (
+        "Feature values:\n"
+        f"  Ambient temperature (C): {feats['AMBIENT_TEMPERATURE']}\n"
+        f"  Module temperature (C): {feats['MODULE_TEMPERATURE']}\n"
+        f"  Irradiation (normalized): {feats['IRRADIATION']}\n"
+        f"  Hour of day: {feats['HOUR']}\n"
+        f"  Day period: {feats['DAY_PERIOD']}\n"
+        f"  Inverter ID: {feats['SOURCE_KEY_GEN']}\n"
+        f"Predicted class: {pred} (1 = underperforming, 0 = normal)\n"
+        f"Predicted probability of underperformance: {proba:.4f}\n"
+        f"Expected AC Power (kW, from regression model): {expected_power:.1f}\n"
+        f"Actual AC Power (kW, measured): {actual_power:.1f}\n"
+        f"Performance Ratio (Actual / Expected): {ratio_str}\n\n"
+        f"Reminder: prediction_label MUST be '{required_label}' for this record, "
+        f"matching Predicted class above exactly.\n\n"
+        "Return the JSON explanation now."
     )
 
 
-def parse_and_validate(raw_response):
-    """Strip whitespace, parse as JSON, validate against EXPLANATION_SCHEMA.
-    Returns (parsed_dict_or_fallback, status_string)."""
+def parse_and_validate(raw_response, pred):
+    """
+    Strip whitespace, parse as JSON, validate against EXPLANATION_SCHEMA, then
+    force prediction_label to match the classifier's actual predicted class.
+
+    THE FIX: prediction_label is descriptive text coming out of the LLM, not a
+    second vote on the classification. The prompt asks the LLM to keep it
+    consistent, but only this hard override in code actually guarantees it on
+    every run regardless of model behavior/temperature/drift.
+
+    Returns (parsed_dict_or_fallback, status_string, label_overridden_bool).
+    """
+    expected_label = "underperforming" if pred == 1 else "normal"
     fallback = {
-        "prediction_label": None,
+        "prediction_label": expected_label,
         "confidence_level": None,
         "top_reason": None,
         "second_reason": None,
         "next_step": None,
     }
     if raw_response is None:
-        return fallback, "fail (no response from call_llm)"
+        return fallback, "fail (no response from call_llm)", False
 
     try:
         parsed = json.loads(raw_response.strip())
     except json.JSONDecodeError as e:
         print(f"JSON decode error: {e}")
-        return fallback, f"fail (JSONDecodeError: {e})"
+        return fallback, f"fail (JSONDecodeError: {e})", False
 
     try:
         validate(instance=parsed, schema=EXPLANATION_SCHEMA)
     except ValidationError as e:
         print(f"Schema validation error: {e.message}")
-        return fallback, f"fail (ValidationError: {e.message})"
+        return fallback, f"fail (ValidationError: {e.message})", False
 
-    return parsed, "pass"
+    # --- THE ACTUAL FIX: never trust the LLM's own prediction_label ---
+    llm_label = str(parsed.get("prediction_label", "")).strip().lower()
+    overridden = llm_label != expected_label
+    if overridden:
+        print(
+            f"NOTE: LLM prediction_label ({parsed.get('prediction_label')!r}) "
+            f"disagreed with classifier's predicted class ({pred}) -- "
+            f"overriding to '{expected_label}'."
+        )
+        parsed["prediction_label"] = expected_label
+
+    return parsed, "pass", overridden
 
 
 # =====================================================================
 # STEP 5 — RUN THE PIPELINE END-TO-END ON THE THREE INPUTS
 # =====================================================================
 print("\n" + "=" * 70)
-print("STEP 5: END-TO-END PIPELINE (guardrail -> LLM -> validate)")
+print("STEP 5: END-TO-END PIPELINE (guardrail -> LLM -> validate -> enforce label)")
 print("=" * 70)
 
 demo_rows = []
 for i, feats in enumerate(hand_crafted_inputs, start=1):
+    pred = predictions[i - 1]
     user_prompt = build_user_prompt(
-        feats, predictions[i - 1], probabilities[i - 1],
+        feats, pred, probabilities[i - 1],
         expected_powers[i - 1], feats["ACTUAL_AC_POWER"], performance_ratios[i - 1],
     )
     print(f"\n--- Input {i} ---")
     print(f"Feature input: {feats}")
-    print(f"Predicted class: {predictions[i - 1]}   Probability: {probabilities[i - 1]:.4f}")
+    print(f"Predicted class: {pred}   Probability: {probabilities[i - 1]:.4f}")
     print(f"Expected power: {expected_powers[i - 1]:.1f} kW   "
           f"Actual power: {feats['ACTUAL_AC_POWER']:.1f} kW   "
           f"Performance ratio: {performance_ratios[i - 1]}")
+    print(f"needs_review (code-computed, class vs ratio disagreement): {needs_review_flags[i - 1]}")
 
     blocked = has_pii(user_prompt)
     if blocked:
@@ -600,20 +673,23 @@ for i, feats in enumerate(hand_crafted_inputs, start=1):
         pass_block = "Passed"
 
     print(f"Raw LLM response: {raw_response!r}")
-    parsed, status = parse_and_validate(raw_response)
+    parsed, status, label_overridden = parse_and_validate(raw_response, pred)
     print(f"Validation outcome: {status}")
+    print(f"Label overridden to match classifier: {label_overridden}")
     print(f"Parsed/fallback explanation: {parsed}")
 
     demo_rows.append({
         "Feature Input": json.dumps(feats),
-        "Predicted Class": predictions[i - 1],
+        "Predicted Class": pred,
         "Probability": round(probabilities[i - 1], 4),
         "Expected Power (kW)": round(expected_powers[i - 1], 1),
         "Actual Power (kW)": feats["ACTUAL_AC_POWER"],
         "Performance Ratio": (
             round(performance_ratios[i - 1], 3) if performance_ratios[i - 1] is not None else None
         ),
+        "Needs Review (code)": needs_review_flags[i - 1],
         "Explanation JSON": json.dumps(parsed),
+        "Label Overridden": label_overridden,
         "Validation Status": status,
         "Guardrail Result": pass_block,
     })
@@ -633,8 +709,9 @@ print("=" * 70)
 
 temp_rows = []
 for i, feats in enumerate(hand_crafted_inputs, start=1):
+    pred = predictions[i - 1]
     user_prompt = build_user_prompt(
-        feats, predictions[i - 1], probabilities[i - 1],
+        feats, pred, probabilities[i - 1],
         expected_powers[i - 1], feats["ACTUAL_AC_POWER"], performance_ratios[i - 1],
     )
 
@@ -649,6 +726,24 @@ for i, feats in enumerate(hand_crafted_inputs, start=1):
     print(f"\nInput {i} @ temp=0.0: {out_t0!r}")
     print(f"Input {i} @ temp=0.7: {out_t7!r}")
 
+    # Even in this raw A/B comparison (pre-override), check whether either
+    # temperature setting produced a prediction_label inconsistent with the
+    # classifier -- useful evidence for the README about why the code-level
+    # override in Step 5 is necessary rather than optional.
+    expected_label = "underperforming" if pred == 1 else "normal"
+
+    def _label_consistent(raw):
+        if raw is None:
+            return None
+        try:
+            lbl = str(json.loads(raw.strip()).get("prediction_label", "")).strip().lower()
+            return lbl == expected_label
+        except json.JSONDecodeError:
+            return None
+
+    consistent_t0 = _label_consistent(out_t0)
+    consistent_t7 = _label_consistent(out_t7)
+
     key_diff = (
         "Not evaluated (no LLM response -- check LLM_API_KEY / connectivity)"
         if (out_t0 is None or out_t7 is None)
@@ -656,9 +751,12 @@ for i, feats in enumerate(hand_crafted_inputs, start=1):
     )
     temp_rows.append({
         "Input": json.dumps(feats),
+        "Predicted Class": pred,
         "Output at temp=0": out_t0,
         "Output at temp=0.7": out_t7,
         "Key difference": key_diff,
+        "Label consistent @temp=0 (pre-override)": consistent_t0,
+        "Label consistent @temp=0.7 (pre-override)": consistent_t7,
     })
 
 temp_table = pd.DataFrame(temp_rows)
@@ -674,52 +772,14 @@ print(
     "samples from a wider slice of the next-token probability distribution, so "
     "wording, emphasis, and sometimes field ordering can vary between runs even "
     "though the underlying prediction and probability fed into the prompt are "
-    "unchanged -- useful for more natural, varied prose but riskier for anything "
-    "downstream code must parse deterministically."
+    "unchanged. The 'Label consistent (pre-override)' columns above show whether "
+    "the raw model output already agreed with the classifier before Step 5's code "
+    "override is applied -- any 'False' there is exactly the failure mode that "
+    "prompted the fix in this version of the script, which is why the pipeline "
+    "no longer trusts the LLM's prediction_label at face value."
 )
 
 print("\nDONE. All tables saved in ./results/.")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
